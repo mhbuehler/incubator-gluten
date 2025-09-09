@@ -1297,3 +1297,53 @@ jobs:
           df -a
           bash dev/buildbundle-veloxbe.sh --run_setup_script=OFF --build_arrow=OFF --spark_version=3.4 --enable_gpu=ON
           ccache -s
+
+  s3-integration-test:
+    runs-on: ubuntu-22.04
+    container: apache/gluten:centos-8-jdk8
+    steps:
+      - uses: actions/checkout@v2
+      - name: Get Ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: '${{ env.CCACHE_DIR }}'
+          key: ccache-centos8-release-shared-${{runner.arch}}-${{github.sha}}
+          restore-keys: |
+            ccache-centos8-release-shared-${{runner.arch}}
+      - name: Build Gluten native libraries with S3 support
+        run: |
+          df -a
+          bash dev/buildbundle-veloxbe.sh --enable_vcpkg=OFF --enable_s3=ON --spark_version=3.5
+          bash dev/build-thirdparty.sh
+          ccache -s
+      - name: Download S3 JARs
+        run: |
+          SPARK_JARS_DIR="/opt/shims/spark35/spark_home/assembly/target/scala-2.12/jars"
+          ${WGET_CMD} https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.2/hadoop-aws-3.3.2.jar -P "$SPARK_JARS_DIR"
+          ${WGET_CMD} https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.788/aws-java-sdk-bundle-1.12.788.jar -P "$SPARK_JARS_DIR"
+      - name: Setup MinIO Server
+        run: |
+          # Install server
+          ${WGET_CMD} https://dl.min.io/server/minio/release/linux-amd64/minio -O /usr/local/bin/minio
+          chmod +x /usr/local/bin/minio
+          # Install client
+          ${WGET_CMD} https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+          # Create data directory
+          mkdir -p /data/minio
+          # Set environment variables
+          export MINIO_ROOT_USER=admin
+          export MINIO_ROOT_PASSWORD=admin123
+          # Start server
+          nohup minio server --console-address ":9001" /data/minio > /tmp/minio.log 2>&1 &
+          sleep 10
+          # Configure test bucket
+          mc alias set s3local http://localhost:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
+          mc mb s3local/gluten-it
+          ${WGET_CMD} https://github.com/apache/incubator-gluten/raw/refs/heads/main/cpp-ch/local-engine/tests/data/iris.parquet
+          mc cp iris.parquet s3local/gluten-it/iris.parquet
+      - name: Run S3 Integration Tests
+        run: |
+          cd tools/gluten-it
+          # mvn clean package...
+          # sbin/gluten-it.sh...
